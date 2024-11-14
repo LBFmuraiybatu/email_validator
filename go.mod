@@ -1,3 +1,3 @@
-module github.com/yourusername/emailvalidator
+module emailvalidator
 
 go 1.21
