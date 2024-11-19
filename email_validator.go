@@ -5,144 +5,208 @@ import (
 	"net"
 	"regexp"
 	"strings"
-	"unicode/utf8"
+	"unicode"
 )
 
-// EmailValidator provides methods for email validation
+// EmailValidator provides methods to validate email addresses
 type EmailValidator struct {
-	// Common email validation regex pattern
-	emailRegex *regexp.Regexp
-	// List of common disposable email domains
-	disposableDomains map[string]bool
+	strictMode bool
 }
 
-// NewEmailValidator creates a new EmailValidator instance
-func NewEmailValidator() *EmailValidator {
-	// RFC 5322 compliant email regex (simplified version)
-	pattern := `^[a-zA-Z0-9.!#$%&'*+/=?^_` + "`" + `{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`
-	
-	ev := &EmailValidator{
-		emailRegex: regexp.MustCompile(pattern),
-		disposableDomains: map[string]bool{
-			"tempmail.com": true,
-			"throwaway.com": true,
-			"guerrillamail.com": true,
-			"mailinator.com": true,
-			"yopmail.com": true,
-			"10minutemail.com": true,
-		},
+// New creates a new EmailValidator instance
+func New() *EmailValidator {
+	return &EmailValidator{
+		strictMode: false,
 	}
-	
-	return ev
 }
 
-// ValidationResult holds the result of email validation
-type ValidationResult struct {
-	IsValid          bool     `json:"is_valid"`
-	Errors           []string `json:"errors,omitempty"`
-	NormalizedEmail  string   `json:"normalized_email,omitempty"`
-	IsDisposable     bool     `json:"is_disposable"`
-	HasMXRecord      bool     `json:"has_mx_record,omitempty"`
+// WithStrictMode enables strict validation (RFC 5322 compliant)
+func (v *EmailValidator) WithStrictMode() *EmailValidator {
+	v.strictMode = true
+	return v
 }
 
 // Validate performs comprehensive email validation
-func (ev *EmailValidator) Validate(email string) ValidationResult {
-	result := ValidationResult{}
-	var errors []string
-
-	// Trim spaces and convert to lowercase
-	normalized := strings.TrimSpace(strings.ToLower(email))
-	result.NormalizedEmail = normalized
-
-	// Check if email is empty
-	if normalized == "" {
-		errors = append(errors, "Email cannot be empty")
-		result.IsValid = false
-		result.Errors = errors
-		return result
+func (v *EmailValidator) Validate(email string) error {
+	if email == "" {
+		return errors.New("email cannot be empty")
 	}
 
-	// Check email length
-	if utf8.RuneCountInString(normalized) > 254 {
-		errors = append(errors, "Email address too long (max 254 characters)")
+	// Basic format validation
+	if err := v.validateFormat(email); err != nil {
+		return err
 	}
 
-	// Validate format using regex
-	if !ev.emailRegex.MatchString(normalized) {
-		errors = append(errors, "Invalid email format")
+	// Local part validation
+	if err := v.validateLocalPart(email); err != nil {
+		return err
 	}
 
-	// Split email into local part and domain
-	parts := strings.Split(normalized, "@")
+	// Domain part validation
+	if err := v.validateDomainPart(email); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateFormat checks the basic email format
+func (v *EmailValidator) validateFormat(email string) error {
+	// Check for @ symbol
+	if !strings.Contains(email, "@") {
+		return errors.New("email must contain @ symbol")
+	}
+
+	// Split into local and domain parts
+	parts := strings.Split(email, "@")
 	if len(parts) != 2 {
-		errors = append(errors, "Invalid email structure")
-		result.IsValid = false
-		result.Errors = errors
-		return result
+		return errors.New("email must contain exactly one @ symbol")
 	}
 
 	localPart := parts[0]
-	domain := parts[1]
+	domainPart := parts[1]
 
-	// Validate local part
-	if len(localPart) > 64 {
-		errors = append(errors, "Local part too long (max 64 characters)")
-	}
-
+	// Check parts are not empty
 	if localPart == "" {
-		errors = append(errors, "Local part cannot be empty")
+		return errors.New("local part cannot be empty")
+	}
+	if domainPart == "" {
+		return errors.New("domain part cannot be empty")
 	}
 
-	// Validate domain
-	if len(domain) > 253 {
-		errors = append(errors, "Domain too long (max 253 characters)")
+	// Check total length (RFC 5321)
+	if len(email) > 254 {
+		return errors.New("email address cannot exceed 254 characters")
 	}
 
-	if domain == "" {
-		errors = append(errors, "Domain cannot be empty")
+	// Check local part length (RFC 5321)
+	if len(localPart) > 64 {
+		return errors.New("local part cannot exceed 64 characters")
 	}
 
-	// Check for disposable email
-	if ev.isDisposableDomain(domain) {
-		result.IsDisposable = true
-		errors = append(errors, "Disposable email addresses are not allowed")
+	return nil
+}
+
+// validateLocalPart validates the local part of the email
+func (v *EmailValidator) validateLocalPart(email string) error {
+	localPart := strings.Split(email, "@")[0]
+
+	// Check if local part starts or ends with dot
+	if strings.HasPrefix(localPart, ".") || strings.HasSuffix(localPart, ".") {
+		return errors.New("local part cannot start or end with a dot")
 	}
 
-	// Check for MX records (optional - can be slow)
-	hasMX, err := ev.checkMXRecords(domain)
-	if err == nil {
-		result.HasMXRecord = hasMX
-		if !hasMX {
-			errors = append(errors, "Domain does not have valid MX records")
+	// Check for consecutive dots
+	if strings.Contains(localPart, "..") {
+		return errors.New("local part cannot contain consecutive dots")
+	}
+
+	// Validate characters based on mode
+	for i, char := range localPart {
+		if v.strictMode {
+			if !isValidStrictLocalChar(char, i, localPart) {
+				return errors.New("local part contains invalid characters")
+			}
+		} else {
+			if !isValidRelaxedLocalChar(char) {
+				return errors.New("local part contains invalid characters")
+			}
 		}
 	}
 
-	result.IsValid = len(errors) == 0
-	result.Errors = errors
-
-	return result
+	return nil
 }
 
-// isDisposableDomain checks if the domain is in the disposable list
-func (ev *EmailValidator) isDisposableDomain(domain string) bool {
-	return ev.disposableDomains[domain]
-}
+// validateDomainPart validates the domain part of the email
+func (v *EmailValidator) validateDomainPart(email string) error {
+	domainPart := strings.Split(email, "@")[1]
 
-// checkMXRecords verifies if the domain has MX records
-func (ev *EmailValidator) checkMXRecords(domain string) (bool, error) {
-	mxRecords, err := net.LookupMX(domain)
-	if err != nil {
-		return false, err
+	// Check if domain part starts or ends with hyphen or dot
+	if strings.HasPrefix(domainPart, "-") || strings.HasSuffix(domainPart, "-") {
+		return errors.New("domain cannot start or end with hyphen")
 	}
-	return len(mxRecords) > 0, nil
+	if strings.HasPrefix(domainPart, ".") || strings.HasSuffix(domainPart, ".") {
+		return errors.New("domain cannot start or end with dot")
+	}
+
+	// Split domain into labels
+	labels := strings.Split(domainPart, ".")
+	if len(labels) < 2 {
+		return errors.New("domain must have at least two parts")
+	}
+
+	// Validate each label
+	for _, label := range labels {
+		if len(label) == 0 {
+			return errors.New("domain label cannot be empty")
+		}
+		if len(label) > 63 {
+			return errors.New("domain label cannot exceed 63 characters")
+		}
+
+		// Check label format
+		for i, char := range label {
+			if i == 0 || i == len(label)-1 {
+				// First and last character cannot be hyphen
+				if char == '-' {
+					return errors.New("domain label cannot start or end with hyphen")
+				}
+			}
+
+			if !isValidDomainChar(char) {
+				return errors.New("domain contains invalid characters")
+			}
+		}
+	}
+
+	// Check TLD (last label)
+	tld := labels[len(labels)-1]
+	if len(tld) < 2 {
+		return errors.New("TLD must be at least 2 characters")
+	}
+
+	// TLD should not contain numbers (with some exceptions, but we'll be strict)
+	for _, char := range tld {
+		if unicode.IsDigit(char) {
+			return errors.New("TLD should not contain numbers")
+		}
+	}
+
+	return nil
 }
 
-// AddDisposableDomain adds a domain to the disposable domains list
-func (ev *EmailValidator) AddDisposableDomain(domain string) {
-	ev.disposableDomains[strings.ToLower(domain)] = true
+// Helper functions for character validation
+func isValidStrictLocalChar(char rune, position int, localPart string) bool {
+	// RFC 5322 compliant local part characters
+	return (char >= 'a' && char <= 'z') ||
+		(char >= 'A' && char <= 'Z') ||
+		(char >= '0' && char <= '9') ||
+		char == '!' || char == '#' || char == '$' || char == '%' ||
+		char == '&' || char == '\'' || char == '*' || char == '+' ||
+		char == '-' || char == '/' || char == '=' || char == '?' ||
+		char == '^' || char == '_' || char == '`' || char == '{' ||
+		char == '|' || char == '}' || char == '~' || char == '.'
 }
 
-// RemoveDisposableDomain removes a domain from the disposable domains list
-func (ev *EmailValidator) RemoveDisposableDomain(domain string) {
-	delete(ev.disposableDomains, strings.ToLower(domain))
+func isValidRelaxedLocalChar(char rune) bool {
+	// More relaxed local part validation (common practice)
+	return (char >= 'a' && char <= 'z') ||
+		(char >= 'A' && char <= 'Z') ||
+		(char >= '0' && char <= '9') ||
+		char == '.' || char == '-' || char == '_' || char == '+'
+}
+
+func isValidDomainChar(char rune) bool {
+	return (char >= 'a' && char <= 'z') ||
+		(char >= 'A' && char <= 'Z') ||
+		(char >= '0' && char <= '9') ||
+		char == '-'
+}
+
+// IsValidSyntax is a quick syntax check using regex (less accurate but faster)
+func (v *EmailValidator) IsValidSyntax(email string) bool {
+	// Simple regex for basic email format
+	pattern := `^[a-zA-Z0-9.!#$%&'*+/=?^_{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`
+	matched, _ := regexp.MatchString(pattern, email)
+	return matched
 }
