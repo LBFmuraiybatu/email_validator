@@ -20,193 +20,211 @@ func New() *EmailValidator {
 	}
 }
 
-// WithStrictMode enables strict validation (RFC 5322 compliant)
-func (v *EmailValidator) WithStrictMode() *EmailValidator {
-	v.strictMode = true
-	return v
+// NewStrict creates a new EmailValidator with strict validation
+func NewStrict() *EmailValidator {
+	return &EmailValidator{
+		strictMode: true,
+	}
+}
+
+// ValidationResult contains detailed validation results
+type ValidationResult struct {
+	IsValid      bool     `json:"is_valid"`
+	Errors       []string `json:"errors,omitempty"`
+	Warnings     []string `json:"warnings,omitempty"`
+	Normalized   string   `json:"normalized,omitempty"`
+	Domain       string   `json:"domain,omitempty"`
+	Username     string   `json:"username,omitempty"`
 }
 
 // Validate performs comprehensive email validation
-func (v *EmailValidator) Validate(email string) error {
-	if email == "" {
-		return errors.New("email cannot be empty")
+func (v *EmailValidator) Validate(email string) ValidationResult {
+	result := ValidationResult{}
+	
+	// Basic format check
+	if !v.isValidFormat(email) {
+		result.Errors = append(result.Errors, "Invalid email format")
+		return result
 	}
-
-	// Basic format validation
-	if err := v.validateFormat(email); err != nil {
-		return err
+	
+	// Extract parts
+	username, domain := v.splitEmail(email)
+	result.Username = username
+	result.Domain = domain
+	
+	// Validate username
+	if err := v.validateUsername(username); err != nil {
+		result.Errors = append(result.Errors, err.Error())
 	}
-
-	// Local part validation
-	if err := v.validateLocalPart(email); err != nil {
-		return err
+	
+	// Validate domain
+	if err := v.validateDomain(domain); err != nil {
+		result.Errors = append(result.Errors, err.Error())
 	}
-
-	// Domain part validation
-	if err := v.validateDomainPart(email); err != nil {
-		return err
+	
+	// Check for common typos
+	if warning := v.checkForTypos(email); warning != "" {
+		result.Warnings = append(result.Warnings, warning)
 	}
-
-	return nil
+	
+	// Normalize email (lowercase)
+	result.Normalized = strings.ToLower(strings.TrimSpace(email))
+	
+	result.IsValid = len(result.Errors) == 0
+	return result
 }
 
-// validateFormat checks the basic email format
-func (v *EmailValidator) validateFormat(email string) error {
-	// Check for @ symbol
-	if !strings.Contains(email, "@") {
-		return errors.New("email must contain @ symbol")
-	}
+// isValidFormat checks basic email format using regex
+func (v *EmailValidator) isValidFormat(email string) bool {
+	// RFC 5322 compliant regex (simplified version)
+	pattern := `^[a-zA-Z0-9.!#$%&'*+/=?^_` + "`" + `{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`
+	matched, _ := regexp.MatchString(pattern, email)
+	return matched
+}
 
-	// Split into local and domain parts
+// splitEmail splits email into username and domain parts
+func (v *EmailValidator) splitEmail(email string) (string, string) {
 	parts := strings.Split(email, "@")
 	if len(parts) != 2 {
-		return errors.New("email must contain exactly one @ symbol")
+		return "", ""
 	}
-
-	localPart := parts[0]
-	domainPart := parts[1]
-
-	// Check parts are not empty
-	if localPart == "" {
-		return errors.New("local part cannot be empty")
-	}
-	if domainPart == "" {
-		return errors.New("domain part cannot be empty")
-	}
-
-	// Check total length (RFC 5321)
-	if len(email) > 254 {
-		return errors.New("email address cannot exceed 254 characters")
-	}
-
-	// Check local part length (RFC 5321)
-	if len(localPart) > 64 {
-		return errors.New("local part cannot exceed 64 characters")
-	}
-
-	return nil
+	return parts[0], parts[1]
 }
 
-// validateLocalPart validates the local part of the email
-func (v *EmailValidator) validateLocalPart(email string) error {
-	localPart := strings.Split(email, "@")[0]
-
-	// Check if local part starts or ends with dot
-	if strings.HasPrefix(localPart, ".") || strings.HasSuffix(localPart, ".") {
-		return errors.New("local part cannot start or end with a dot")
+// validateUsername checks username part constraints
+func (v *EmailValidator) validateUsername(username string) error {
+	if len(username) == 0 {
+		return errors.New("username cannot be empty")
 	}
-
+	
+	if len(username) > 64 {
+		return errors.New("username too long (max 64 characters)")
+	}
+	
 	// Check for consecutive dots
-	if strings.Contains(localPart, "..") {
-		return errors.New("local part cannot contain consecutive dots")
+	if strings.Contains(username, "..") {
+		return errors.New("username cannot contain consecutive dots")
 	}
-
-	// Validate characters based on mode
-	for i, char := range localPart {
-		if v.strictMode {
-			if !isValidStrictLocalChar(char, i, localPart) {
-				return errors.New("local part contains invalid characters")
-			}
-		} else {
-			if !isValidRelaxedLocalChar(char) {
-				return errors.New("local part contains invalid characters")
+	
+	// Check if starts or ends with dot
+	if strings.HasPrefix(username, ".") || strings.HasSuffix(username, ".") {
+		return errors.New("username cannot start or end with a dot")
+	}
+	
+	// In strict mode, check for special characters
+	if v.strictMode {
+		for _, char := range username {
+			if !v.isValidUsernameChar(char) {
+				return errors.New("username contains invalid characters")
 			}
 		}
 	}
-
+	
 	return nil
 }
 
-// validateDomainPart validates the domain part of the email
-func (v *EmailValidator) validateDomainPart(email string) error {
-	domainPart := strings.Split(email, "@")[1]
-
-	// Check if domain part starts or ends with hyphen or dot
-	if strings.HasPrefix(domainPart, "-") || strings.HasSuffix(domainPart, "-") {
-		return errors.New("domain cannot start or end with hyphen")
+// validateDomain checks domain part constraints
+func (v *EmailValidator) validateDomain(domain string) error {
+	if len(domain) == 0 {
+		return errors.New("domain cannot be empty")
 	}
-	if strings.HasPrefix(domainPart, ".") || strings.HasSuffix(domainPart, ".") {
-		return errors.New("domain cannot start or end with dot")
+	
+	if len(domain) > 253 {
+		return errors.New("domain too long (max 253 characters)")
 	}
-
-	// Split domain into labels
-	labels := strings.Split(domainPart, ".")
-	if len(labels) < 2 {
+	
+	// Check for valid domain structure
+	domainParts := strings.Split(domain, ".")
+	if len(domainParts) < 2 {
 		return errors.New("domain must have at least two parts")
 	}
-
-	// Validate each label
-	for _, label := range labels {
-		if len(label) == 0 {
-			return errors.New("domain label cannot be empty")
+	
+	// Check each domain part
+	for _, part := range domainParts {
+		if len(part) == 0 {
+			return errors.New("domain part cannot be empty")
 		}
-		if len(label) > 63 {
-			return errors.New("domain label cannot exceed 63 characters")
+		if len(part) > 63 {
+			return errors.New("domain part too long (max 63 characters)")
 		}
-
-		// Check label format
-		for i, char := range label {
-			if i == 0 || i == len(label)-1 {
-				// First and last character cannot be hyphen
-				if char == '-' {
-					return errors.New("domain label cannot start or end with hyphen")
-				}
-			}
-
-			if !isValidDomainChar(char) {
+		if strings.HasPrefix(part, "-") || strings.HasSuffix(part, "-") {
+			return errors.New("domain part cannot start or end with hyphen")
+		}
+		
+		// Check for valid characters in domain part
+		for _, char := range part {
+			if !v.isValidDomainChar(char) {
 				return errors.New("domain contains invalid characters")
 			}
 		}
 	}
-
-	// Check TLD (last label)
-	tld := labels[len(labels)-1]
-	if len(tld) < 2 {
-		return errors.New("TLD must be at least 2 characters")
-	}
-
-	// TLD should not contain numbers (with some exceptions, but we'll be strict)
-	for _, char := range tld {
-		if unicode.IsDigit(char) {
-			return errors.New("TLD should not contain numbers")
-		}
-	}
-
+	
 	return nil
 }
 
-// Helper functions for character validation
-func isValidStrictLocalChar(char rune, position int, localPart string) bool {
-	// RFC 5322 compliant local part characters
-	return (char >= 'a' && char <= 'z') ||
-		(char >= 'A' && char <= 'Z') ||
-		(char >= '0' && char <= '9') ||
-		char == '!' || char == '#' || char == '$' || char == '%' ||
-		char == '&' || char == '\'' || char == '*' || char == '+' ||
-		char == '-' || char == '/' || char == '=' || char == '?' ||
-		char == '^' || char == '_' || char == '`' || char == '{' ||
-		char == '|' || char == '}' || char == '~' || char == '.'
+// isValidUsernameChar checks if character is valid in email username
+func (v *EmailValidator) isValidUsernameChar(char rune) bool {
+	return unicode.IsLetter(char) || unicode.IsDigit(char) ||
+		char == '!' || char == '#' || char == '$' || char == '%' || char == '&' ||
+		char == '\'' || char == '*' || char == '+' || char == '-' || char == '/' ||
+		char == '=' || char == '?' || char == '^' || char == '_' || char == '`' ||
+		char == '{' || char == '|' || char == '}' || char == '~' || char == '.'
 }
 
-func isValidRelaxedLocalChar(char rune) bool {
-	// More relaxed local part validation (common practice)
-	return (char >= 'a' && char <= 'z') ||
-		(char >= 'A' && char <= 'Z') ||
-		(char >= '0' && char <= '9') ||
-		char == '.' || char == '-' || char == '_' || char == '+'
+// isValidDomainChar checks if character is valid in domain part
+func (v *EmailValidator) isValidDomainChar(char rune) bool {
+	return unicode.IsLetter(char) || unicode.IsDigit(char) || char == '-'
 }
 
-func isValidDomainChar(char rune) bool {
-	return (char >= 'a' && char <= 'z') ||
-		(char >= 'A' && char <= 'Z') ||
-		(char >= '0' && char <= '9') ||
-		char == '-'
+// checkForTypos looks for common email typos
+func (v *EmailValidator) checkForTypos(email string) string {
+	lowerEmail := strings.ToLower(email)
+	
+	// Check for common domain typos
+	commonTypos := map[string]string{
+		"gmial.com":  "gmail.com",
+		"gmal.com":   "gmail.com",
+		"gmai.com":   "gmail.com",
+		"yahooo.com": "yahoo.com",
+		"yaho.com":   "yahoo.com",
+		"hotmal.com": "hotmail.com",
+		"hotmai.com": "hotmail.com",
+	}
+	
+	for typo, correct := range commonTypos {
+		if strings.Contains(lowerEmail, "@"+typo) {
+			return "Possible typo detected: " + typo + " should be " + correct
+		}
+	}
+	
+	return ""
 }
 
-// IsValidSyntax is a quick syntax check using regex (less accurate but faster)
-func (v *EmailValidator) IsValidSyntax(email string) bool {
-	// Simple regex for basic email format
-	pattern := `^[a-zA-Z0-9.!#$%&'*+/=?^_{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`
-	matched, _ := regexp.MatchString(pattern, email)
-	return matched
+// IsDisposableDomain checks if the email domain is from a known disposable email service
+func (v *EmailValidator) IsDisposableDomain(email string) bool {
+	_, domain := v.splitEmail(email)
+	
+	// List of common disposable email domains (truncated for example)
+	disposableDomains := map[string]bool{
+		"tempmail.com":    true,
+		"throwaway.com":   true,
+		"guerrillamail.com": true,
+		"mailinator.com":  true,
+		"yopmail.com":     true,
+		"10minutemail.com": true,
+	}
+	
+	return disposableDomains[strings.ToLower(domain)]
+}
+
+// HasMXRecord checks if the domain has valid MX records
+func (v *EmailValidator) HasMXRecord(email string) bool {
+	_, domain := v.splitEmail(email)
+	
+	mxRecords, err := net.LookupMX(domain)
+	if err != nil || len(mxRecords) == 0 {
+		return false
+	}
+	
+	return true
 }
